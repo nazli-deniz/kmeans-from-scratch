@@ -1,0 +1,6 @@
+source("kmeans_main.R")
+data(iris)
+iris_scaled <- as.matrix(scale(iris[, 1:4]))
+colnames(iris_scaled) <- colnames(iris[, 1:4])
+set.seed(42)
+kmeans_pp(iris_scaled, k = 3, visualize = TRUE)
