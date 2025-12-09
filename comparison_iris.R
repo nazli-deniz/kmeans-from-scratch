@@ -1,141 +1,222 @@
+
 source("kmeans_helpers.R")
 source("kmeans_main.R")
 
 library(ggplot2)
 library(gridExtra)
-library(clue)
+library(mclust)
 
-# Load and preprocess dataset
-
+# Load and prepare iris data
 data(iris)
 X <- as.matrix(iris[, 1:4])
 scaled_data <- scale(X)
 classes <- iris$Species
-k_chosen <- length(unique(classes))  # = 3
+k_chosen <- length(unique(classes))
+true_labels <- as.numeric(classes)
 
-# Elbow method (built-in K-means)
-
-set.seed(42)
-wss <- sapply(1:10, function(k) {
-  kmeans(scaled_data, k, nstart = 25)$tot.withinss
-})
-
-elbow_plot <- ggplot(data.frame(k = 1:10, WSS = wss), aes(x = k, y = WSS)) +
-  geom_point() + geom_line() +
-  labs(title = "Elbow Method for Iris (Built-in K-means)",
-       x = "Number of clusters k",
-       y = "Total Within-Cluster Sum of Squares") +
-  theme_minimal()
-
-# Built-in K-means
-
-set.seed(42)
-km_builtin <- kmeans(scaled_data, centers = k_chosen, nstart = 25)
-builtin_clusters <- km_builtin$cluster
-
-# Scratch K-means (Random Init)
-
-scratch_random_hist <- kmeans_iterations(
-  scaled_data,
-  k = k_chosen,
-  max_iter = 100,
-  use_kmeanspp = FALSE
-)
-
-final_random <- tail(scratch_random_hist, 1)[[1]]
-scratch_random_clusters <- final_random$clusters
-scratch_random_centroids <- final_random$centroids
-
-# Scratch K-means++
-
-scratch_pp_hist <- kmeans_iterations(
-  scaled_data,
-  k = k_chosen,
-  max_iter = 100,
-  use_kmeanspp = TRUE
-)
-
-final_pp <- tail(scratch_pp_hist, 1)[[1]]
-scratch_pp_clusters <- final_pp$clusters
-scratch_pp_centroids <- final_pp$centroids
-
-# Cluster-to-species mapping (Hungarian algorithm)
-
-map_clusters_to_classes <- function(clusters, classes) {
-  clusters <- as.numeric(clusters)
-  class_nums <- as.numeric(factor(classes))
-  k <- length(unique(clusters))
-  
-  cont_table <- table(clusters, class_nums)
-  assignment <- solve_LSAP(cont_table, maximum = TRUE)
-  
-  new_clusters <- clusters
-  for (i in 1:k) {
-    new_clusters[clusters == i] <- assignment[i]
+# Function to calculate inertia
+calculate_inertia <- function(data, clusters, centroids) {
+  inertia <- 0
+  for (i in 1:nrow(data)) {
+    cluster_id <- clusters[i]
+    point <- as.numeric(data[i, ])
+    centroid <- as.numeric(centroids[cluster_id, ])
+    inertia <- inertia + sum((point - centroid)^2)
   }
-  
-  factor(new_clusters, labels = levels(factor(classes)))
+  return(inertia)
 }
 
-builtin_matched  <- map_clusters_to_classes(builtin_clusters, classes)
-random_matched   <- map_clusters_to_classes(scratch_random_clusters, classes)
-pp_matched       <- map_clusters_to_classes(scratch_pp_clusters, classes)
+# Function to calculate ARI
+calculate_ari <- function(predicted, true_labels) {
+  return(adjustedRandIndex(true_labels, predicted))
+}
 
-# PCA for visualization
+# Run K-means multiple times with random initialization
+set.seed(100)
+n_runs <- 20
+random_results <- list()
+random_aris <- numeric(n_runs)
+random_inertias <- numeric(n_runs)
 
-pca_res <- prcomp(scaled_data, center = TRUE, scale. = TRUE)
-pca_data <- data.frame(
-  pca_res$x[,1:2],
-  Builtin = builtin_matched,
-  RandomInit = random_matched,
-  KmeansPP = pp_matched,
-  TrueClass = factor(classes)
+for (run in 1:n_runs) {
+  result <- kmeans_iterations(scaled_data, k = k_chosen, max_iter = 100, tol = 1e-4, 
+                              use_kmeanspp = FALSE, visualize_init = FALSE)
+  final_iter <- length(result)
+  final_clusters <- result[[final_iter]]$clusters
+  final_centroids <- result[[final_iter]]$centroids
+  
+  ari <- calculate_ari(final_clusters, true_labels)
+  inertia <- calculate_inertia(scaled_data, final_clusters, final_centroids)
+  
+  random_aris[run] <- ari
+  random_inertias[run] <- inertia
+  random_results[[run]] <- list(clusters = final_clusters, centroids = final_centroids, 
+                                ari = ari, inertia = inertia)
+}
+
+# Run K-means multiple times with K-means++ initialization
+set.seed(456)
+kmeans_pp_results <- list()
+kmeans_pp_aris <- numeric(n_runs)
+kmeans_pp_inertias <- numeric(n_runs)
+
+for (run in 1:n_runs) {
+  result <- kmeans_iterations(scaled_data, k = k_chosen, max_iter = 100, tol = 1e-4, 
+                              use_kmeanspp = TRUE, visualize_init = FALSE)
+  final_iter <- length(result)
+  final_clusters <- result[[final_iter]]$clusters
+  final_centroids <- result[[final_iter]]$centroids
+  
+  ari <- calculate_ari(final_clusters, true_labels)
+  inertia <- calculate_inertia(scaled_data, final_clusters, final_centroids)
+  
+  kmeans_pp_aris[run] <- ari
+  kmeans_pp_inertias[run] <- inertia
+  kmeans_pp_results[[run]] <- list(clusters = final_clusters, centroids = final_centroids, 
+                                   ari = ari, inertia = inertia)
+}
+
+# Run built-in kmeans() 20 independent times
+set.seed(456)
+builtin_results <- list()
+builtin_aris <- numeric(n_runs)
+builtin_inertias <- numeric(n_runs)
+
+for (run in 1:n_runs) {
+  km <- kmeans(scaled_data, centers = k_chosen, nstart = 1)  # one real independent run
+  
+  ari <- adjustedRandIndex(km$cluster, true_labels)
+  inertia <- km$tot.withinss
+  
+  builtin_aris[run] <- ari
+  builtin_inertias[run] <- inertia
+  builtin_results[[run]] <- list(clusters = km$cluster,
+                                 centroids = km$centers,
+                                 ari = ari,
+                                 inertia = inertia)
+}
+
+# Print statistics
+cat("=== RANDOM INITIALIZATION ===\n")
+cat("Mean ARI:", round(mean(random_aris), 4), "\n")
+cat("Std Dev:", round(sd(random_aris), 4), "\n")
+cat("Min:", round(min(random_aris), 4), "\n")
+cat("Max:", round(max(random_aris), 4), "\n\n")
+
+cat("Mean Inertia:", round(mean(random_inertias), 4), "\n")
+cat("Std Dev:", round(sd(random_inertias), 4), "\n\n")
+
+cat("=== K-MEANS++ INITIALIZATION ===\n")
+cat("Mean ARI:", round(mean(kmeans_pp_aris), 4), "\n")
+cat("Std Dev:", round(sd(kmeans_pp_aris), 4), "\n")
+cat("Min:", round(min(kmeans_pp_aris), 4), "\n")
+cat("Max:", round(max(kmeans_pp_aris), 4), "\n\n")
+
+cat("Mean Inertia:", round(mean(kmeans_pp_inertias), 4), "\n")
+cat("Std Dev:", round(sd(kmeans_pp_inertias), 4), "\n\n")
+
+cat("=== BUILT-IN kmeans() - 20 independent runs ===\n")
+cat("Mean ARI:", round(mean(builtin_aris), 4), "\n")
+cat("Std Dev:", round(sd(builtin_aris), 4), "\n")
+cat("Min:", round(min(builtin_aris), 4), "\n")
+cat("Max:", round(max(builtin_aris), 4), "\n")
+cat("Mean Inertia:", round(mean(builtin_inertias), 4), "\n\n")
+
+# Create comparison dataframes for boxplots (now 3 methods)
+ari_df <- data.frame(
+  ARI = c(random_aris, kmeans_pp_aris, builtin_aris),
+  Method = rep(c("Random Init", "K-Means++", "Built-in kmeans"), each = n_runs)
 )
 
-# Project centroids
+inertia_df <- data.frame(
+  Inertia = c(random_inertias, kmeans_pp_inertias, builtin_inertias),
+  Method = rep(c("Random Init", "K-Means++", "Built-in kmeans"), each = n_runs)
+)
 
-pp_centroids_pca <- predict(pca_res, newdata = scratch_pp_centroids)
-rand_centroids_pca <- predict(pca_res, newdata = scratch_random_centroids)
+# ARI boxplot
+p1 <- ggplot(ari_df, aes(x = Method, y = ARI, fill = Method)) +
+  geom_boxplot(alpha = 0.7) +
+  geom_jitter(width = 0.2, alpha = 0.5, size = 2) +
 
-# Plotting function
+  ggtitle("Adjusted Rand Index Comparison (20 runs each)") +
+  ylab("ARI") +
+  theme_minimal(base_size = 12) +
+  theme(legend.position = "none", axis.text.x = element_text(angle = 10, hjust = 1))
 
-calc_accuracy <- function(pred, true) mean(pred == true)
+# Inertia boxplot
+p2 <- ggplot(inertia_df, aes(x = Method, y = Inertia, fill = Method)) +
+  geom_boxplot(alpha = 0.7) +
+  geom_jitter(width = 0.2, alpha = 0.5, size = 2) +
 
-plot_with_accuracy <- function(pca_data, x_col, y_col, cluster_col, true_col, title, accuracy) {
-  ggplot(pca_data, aes_string(x = x_col, y = y_col, color = cluster_col, shape = true_col)) +
-    geom_point(size = 3, alpha = 0.8) +
-    labs(title = paste0(title, " (Accuracy: ", round(accuracy, 4), ")")) +
-    theme_minimal()
-}
+  ggtitle("Inertia Comparison (20 runs each)") +
+  ylab("Within-Cluster Sum of Squares") +
+  theme_minimal(base_size = 12) +
+  theme(legend.position = "none", axis.text.x = element_text(angle = 10, hjust = 1))
 
-acc_builtin <- calc_accuracy(builtin_matched, classes)
-acc_random  <- calc_accuracy(random_matched, classes)
-acc_pp      <- calc_accuracy(pp_matched, classes)
+# PCA for 2D visualization
+pca_res <- prcomp(scaled_data)
 
-p_builtin <- plot_with_accuracy(pca_data, "PC1", "PC2", "Builtin", "TrueClass", "Built-in K-means", acc_builtin)
-p_random  <- plot_with_accuracy(pca_data, "PC1", "PC2", "RandomInit", "TrueClass", "Scratch K-means (Random Init)", acc_random)
-p_pp      <- plot_with_accuracy(pca_data, "PC1", "PC2", "KmeansPP", "TrueClass", "Scratch K-means++", acc_pp)
+# Best Random Init
+best_random_idx <- which.max(random_aris)
+best_random <- random_results[[best_random_idx]]
+pca_data_random <- data.frame(pca_res$x[,1:2], 
+                              Cluster = as.factor(best_random$clusters),
+                              TrueClass = classes)
 
-# Centroids overlay for K-means++
+p3 <- ggplot(pca_data_random, aes(PC1, PC2, color = Cluster, shape = TrueClass)) +
+  geom_point(size = 3, alpha = 0.8) +
+  geom_point(data = as.data.frame(predict(pca_res, best_random$centroids)),
+             aes(PC1, PC2), color = "black", size = 6, shape = 8) +
+  ggtitle(paste("Best Random Init (ARI =", round(best_random$ari, 4), ")")) +
+  theme_minimal(base_size = 12) +
+  theme(legend.position = "right")
 
-pp_centroids_df <- data.frame(pp_centroids_pca[,1:2])
-p_centroids <- ggplot(pca_data, aes(PC1, PC2, color = KmeansPP)) +
-  geom_point(alpha = 0.4) +
-  geom_point(data = pp_centroids_df, aes(PC1, PC2), shape = 8, size = 4, color = "black") +
-  labs(title = paste0("K-means++ Centroids (Accuracy: ", round(acc_pp, 4), ")")) +
-  theme_minimal()
+# Best K-Means++
+best_pp_idx <- which.max(kmeans_pp_aris)
+best_pp <- kmeans_pp_results[[best_pp_idx]]
+pca_data_pp <- data.frame(pca_res$x[,1:2], 
+                          Cluster = as.factor(best_pp$clusters),
+                          TrueClass = classes)
 
-# Confusion Matrices
+p4 <- ggplot(pca_data_pp, aes(PC1, PC2, color = Cluster, shape = TrueClass)) +
+  geom_point(size = 3, alpha = 0.8) +
+  geom_point(data = as.data.frame(predict(pca_res, best_pp$centroids)),
+             aes(PC1, PC2), color = "black", size = 6, shape = 8) +
+  ggtitle(paste("Best K-Means++ (ARI =", round(best_pp$ari, 4), ")")) +
+  theme_minimal(base_size = 12) +
+  theme(legend.position = "right")
 
-cat("Built-in K-means:\n")
-print(table(Predicted = builtin_matched, Actual = classes))
+# Best Built-in kmeans
+best_builtin_idx <- which.max(builtin_aris)
+best_builtin <- builtin_results[[best_builtin_idx]]
+pca_data_builtin <- data.frame(pca_res$x[,1:2], 
+                               Cluster = as.factor(best_builtin$clusters),
+                               TrueClass = classes)
 
-cat("\nScratch (Random Init):\n")
-print(table(Predicted = random_matched, Actual = classes))
+p_builtin <- ggplot(pca_data_builtin, aes(PC1, PC2, color = Cluster, shape = TrueClass)) +
+  geom_point(size = 3, alpha = 0.8) +
+  geom_point(data = as.data.frame(predict(pca_res, best_builtin$centroids)),
+             aes(PC1, PC2), color = "black", size = 6, shape = 8) +
+  ggtitle(paste("Best Built-in kmeans (ARI =", round(best_builtin$ari, 4), ")")) +
+  theme_minimal(base_size = 12) +
+  theme(legend.position = "right")
 
-cat("\nScratch (K-means++):\n")
-print(table(Predicted = pp_matched, Actual = classes))
+# Worst Random Init (for contrast)
+worst_random_idx <- which.min(random_aris)
+worst_random <- random_results[[worst_random_idx]]
+pca_data_worst <- data.frame(pca_res$x[,1:2], 
+                             Cluster = as.factor(worst_random$clusters),
+                             TrueClass = classes)
 
-# Display plots
-grid.arrange(p_builtin, p_random, p_pp, ncol = 2)
-print(elbow_plot)
+p6 <- ggplot(pca_data_worst, aes(PC1, PC2, color = Cluster, shape = TrueClass)) +
+  geom_point(size = 3, alpha = 0.8) +
+  geom_point(data = as.data.frame(predict(pca_res, worst_random$centroids)),
+             aes(PC1, PC2), color = "black", size = 6, shape = 8) +
+  ggtitle(paste("Worst Random Init (ARI =", round(worst_random$ari, 4), ")")) +
+  theme_minimal(base_size = 12) +
+  theme(legend.position = "right")
+
+# Final 6-plot grid
+grid.arrange(p1, p2, p3, p4, p_builtin, p6, ncol = 2,
+             top = "K-Means Initialization Comparison on Iris Dataset (k=3)")
+
